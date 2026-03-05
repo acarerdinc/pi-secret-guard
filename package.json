@@ -1,0 +1,18 @@
+{
+  "name": "pi-secret-guard",
+  "version": "1.0.0",
+  "description": "A pi extension that guards against committing secrets, API keys, and credentials to git repositories using hybrid regex + LLM review.",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acarerdinc/pi-secret-guard"
+  },
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  }
+}
