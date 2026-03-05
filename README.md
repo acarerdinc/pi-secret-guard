@@ -7,8 +7,7 @@ Catches secrets before they reach git. Regex scan for known patterns, then the a
 
 A [pi](https://github.com/badlogic/pi-mono) extension.
 
-<!-- TODO: Add screenshot/recording of the extension blocking a commit -->
-<!-- ![demo](media/demo.png) -->
+![pi-secret-guard blocking a commit with AWS keys and database credentials](media/demo.png)
 
 ## Install
 
