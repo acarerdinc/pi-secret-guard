@@ -10,9 +10,9 @@ Uses a **hybrid approach**: fast regex pre-scan for known secret patterns, follo
 git commit / git push intercepted
          │
          ▼
-  ┌─────────────┐
+  ┌──────────────┐
   │ Get the diff │  (staged changes for commit, unpushed commits for push)
-  └──────┬──────┘
+  └──────┬───────┘
          │
          ▼
   ┌──────────────────┐      Found secrets
