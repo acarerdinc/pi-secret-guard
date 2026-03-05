@@ -40,7 +40,13 @@ git commit / git push intercepted
 
 ## Installation
 
-### From GitHub (recommended)
+### From npm (recommended)
+
+```bash
+pi install npm:pi-secret-guard
+```
+
+### From GitHub
 
 ```bash
 pi install https://github.com/acarerdinc/pi-secret-guard
