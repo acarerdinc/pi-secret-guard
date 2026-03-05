@@ -150,6 +150,37 @@ This hardcoded password should be moved to an environment variable.
 I will NOT re-issue the commit.
 ```
 
+## Why not just rely on GitHub Push Protection?
+
+GitHub has its own [push protection](https://docs.github.com/en/code-security/secret-scanning/push-protection-for-repositories-and-organizations/about-push-protection) that blocks pushes containing known secret patterns. It's a great last line of defense — but it operates at a fundamentally different stage:
+
+```
+Code is written
+      │
+      ▼
+ pi-secret-guard        ← Blocks BEFORE the commit (secret never enters git history)
+      │
+      ▼
+ git commit
+      │
+      ▼
+ GitHub Push Protection  ← Blocks BEFORE the push (secret is in local history)
+      │
+      ▼
+ GitHub Secret Scanning  ← Alerts AFTER the push (async, broader coverage)
+```
+
+| | pi-secret-guard | GitHub Push Protection |
+|---|---|---|
+| **When** | Before `git commit` | Before `git push` |
+| **Secret in git history?** | ❌ Never | ✅ Already committed locally |
+| **Cleanup needed?** | Just fix the file | Rewrite git history (`reset`, `rebase`, `filter-branch`) |
+| **Contextual review** | ✅ LLM reads the diff with project context | ❌ Pattern matching only |
+| **Catches subtle secrets** | ✅ Hardcoded passwords, internal URLs, config objects | ❌ Only known token formats |
+| **Works offline** | ✅ Regex phase works without network | ❌ Requires GitHub remote |
+
+The earlier you catch a secret, the cheaper the fix. This extension ensures secrets never make it into a commit in the first place — GitHub Push Protection is a safety net for anything that slips through.
+
 ## Limitations
 
 - **Regex false positives**: Some patterns (e.g., generic password assignment) may flag non-sensitive values. The agent review helps distinguish real secrets from false positives.
