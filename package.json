@@ -1,6 +1,6 @@
 {
   "name": "pi-secret-guard",
-  "version": "1.2.10",
+  "version": "1.2.11",
   "description": "A pi extension that guards against committing secrets, API keys, and credentials to git repositories using hybrid regex + LLM review.",
   "type": "module",
   "keywords": [
