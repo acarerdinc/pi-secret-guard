@@ -1,29 +1,30 @@
 /**
  * pi-secret-guard
  *
- * A pi extension that prevents committing secrets, API keys, and credentials
- * to git repositories. Uses a hybrid approach:
+ * Hybrid git secret guard for pi:
+ *   1. Regex pre-scan for known secret formats
+ *   2. LLM review for subtle secrets
+ *   3. Exact re-issue allowed only after the review block is present in session history
  *
- *   1. Regex pre-scan — catches obvious, well-known secret patterns instantly
- *   2. Agent review  — sends the diff to the LLM for contextual review
- *
- * Flow:
- *   - Intercepts `git commit` and `git push` bash commands
- *   - Scans staged/unpushed diff with regex patterns
- *   - If regex finds secrets → hard block (no bypass)
- *   - If regex finds nothing → blocks and asks the agent to review the diff
- *   - Agent reviews and re-issues the command if clean
- *   - On re-issue, if diff hasn't changed → allowed through
+ * Important safety behavior:
+ *   - Regex hits are hard-blocked.
+ *   - Clean diffs are soft-blocked for review.
+ *   - Re-issue is only allowed for the exact same repo/action/diff within TTL,
+ *     and only when the previous guard review block is visible in session history.
+ *   - Compound commands that mix `git commit` and `git push` are blocked and must
+ *     be split, because the commit changes the push diff and cannot be safely
+ *     re-issued as one exact command.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType, truncateHead, formatSize } from "@mariozechner/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import {
 	type ReviewState,
 	detectGitAction,
+	detectGitActions,
 	isCommitAll,
 	hashDiff,
 	scanDiffForSecrets,
@@ -31,15 +32,6 @@ import {
 	formatFindings,
 } from "./scanner.ts";
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/**
- * Spawns a process and returns stdout/stderr.
- * Using direct spawn instead of pi.exec() to avoid re-entrant crashes
- * when the tool_call handler fires on a re-issued command.
- */
 function execGit(
 	args: string[],
 	cwd: string,
@@ -56,7 +48,18 @@ function execGit(
 }
 
 type GitAction = "commit" | "push";
-type PersistedReviewState = ReviewState & { action: GitAction; repoRoot: string };
+type ReviewStatus = "pending";
+type PersistedReviewState = ReviewState & {
+	action: GitAction;
+	repoRoot: string;
+	status: ReviewStatus;
+	command: string;
+};
+
+const REVIEW_TTL_MS = 5 * 60 * 1000;
+const DIFF_TRUNCATE_LINES = 500;
+const DIFF_TRUNCATE_BYTES = 30_000;
+const REVIEW_TAG = "SECRET_GUARD_REVIEW";
 
 function stripQuotes(value: string): string {
 	const trimmed = value.trim();
@@ -77,11 +80,6 @@ function getSessionCwd(pi: ExtensionAPI): string {
 	}
 }
 
-/**
- * Best-effort extraction of the command cwd for common patterns like:
- *   cd /repo && git commit ...
- * Falls back to the session cwd.
- */
 function getCommandCwd(command: string, fallbackCwd: string): string {
 	const trimmed = command.trim();
 	const match = trimmed.match(/^cd\s+((?:"[^"]+"|'[^']+'|[^&;|])+?)\s*&&/);
@@ -121,99 +119,157 @@ function saveReviewState(stateFilePath: string, state: PersistedReviewState): vo
 		mkdirSync(dirname(stateFilePath), { recursive: true });
 		writeFileSync(stateFilePath, JSON.stringify(state), "utf-8");
 	} catch {
-		// File write failed — state will only persist for this invocation.
+		// best effort
 	}
 }
 
-// ============================================================================
-// Extension
-// ============================================================================
+function clearReviewState(stateFilePath: string | null): void {
+	if (!stateFilePath) return;
+	try {
+		if (existsSync(stateFilePath)) unlinkSync(stateFilePath);
+	} catch {
+		// best effort
+	}
+}
 
-const REVIEW_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const DIFF_TRUNCATE_LINES = 500;
-const DIFF_TRUNCATE_BYTES = 30_000; // ~30KB — leaves room in context
+function normalizeCommand(command: string): string {
+	return command.trim().replace(/\s+/g, " ");
+}
+
+function makeReviewMarker(action: GitAction, diffHash: string, command: string): string {
+	return `${REVIEW_TAG}:${action}:${diffHash}:${normalizeCommand(command)}`;
+}
+
+function extractTextContent(content: unknown): string {
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((part) => {
+			if (!part || typeof part !== "object") return "";
+			const maybeText = (part as { text?: unknown }).text;
+			return typeof maybeText === "string" ? maybeText : "";
+		})
+		.join("\n");
+}
+
+function hasRecentMatchingReviewBlock(
+	pi: ExtensionAPI,
+	action: GitAction,
+	diffHash: string,
+	command: string,
+): boolean {
+	const marker = makeReviewMarker(action, diffHash, command);
+	try {
+		const branch = pi.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i] as any;
+			if (entry?.type !== "message") continue;
+			const msg = entry.message;
+			if (msg?.role === "user") return false;
+			if (msg?.role !== "toolResult") continue;
+			if (!msg.isError) continue;
+			const text = extractTextContent(msg.content);
+			if (text.includes(marker)) return true;
+		}
+	} catch {
+		return false;
+	}
+	return false;
+}
+
+async function getDiffForAction(action: GitAction, commandCwd: string, command: string): Promise<string> {
+	if (action === "commit") {
+		if (isCommitAll(command)) {
+			const [staged, unstaged] = await Promise.all([
+				execGit(["diff", "--cached", "--no-color"], commandCwd),
+				execGit(["diff", "--no-color"], commandCwd),
+			]);
+			return (staged.stdout || "") + "\n" + (unstaged.stdout || "");
+		}
+		const result = await execGit(["diff", "--cached", "--no-color"], commandCwd);
+		return result.code === 0 ? result.stdout : "";
+	}
+
+	const upstream = await execGit(["diff", "@{u}..HEAD", "--no-color"], commandCwd);
+	if (upstream.code === 0) return upstream.stdout;
+
+	for (const ref of ["origin/main", "origin/master"]) {
+		const fallback = await execGit(["diff", `${ref}..HEAD`, "--no-color"], commandCwd);
+		if (fallback.code === 0) return fallback.stdout;
+	}
+
+	return "";
+}
 
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (!isToolCallEventType("bash", event)) return;
 
 		const command = event.input.command;
+		const gitActions = detectGitActions(command);
 		const gitAction = detectGitAction(command);
 		if (!gitAction) return;
+
+		if (gitActions.length > 1) {
+			return {
+				block: true,
+				reason: [
+					"🚫 SECRET GUARD: Split git commit and git push into separate commands.",
+					"",
+					"This command mixes multiple git actions in one shell invocation.",
+					"Secret Guard cannot safely review-and-reissue `git commit && git push` as one exact command,",
+					"because the commit changes the push diff.",
+					"",
+					"Run them separately:",
+					"  1. git commit ...",
+					"  2. git push ...",
+				].join("\n"),
+			};
+		}
 
 		const sessionCwd = getSessionCwd(pi);
 		const commandCwd = getCommandCwd(command, sessionCwd);
 		const repoRoot = await getRepoRoot(commandCwd);
-		if (!repoRoot) return; // Not a git repo, let git handle it
+		if (!repoRoot) return;
 
 		const stateFilePath = await getStateFilePath(gitAction, commandCwd);
-
-		// ── Get the relevant diff ───────────────────────────────────────────
-
-		let diff = "";
-
-		if (gitAction === "commit") {
-			// For `git commit -a` / `--all`, include unstaged tracked changes too
-			if (isCommitAll(command)) {
-				const [staged, unstaged] = await Promise.all([
-					execGit(["diff", "--cached", "--no-color"], commandCwd),
-					execGit(["diff", "--no-color"], commandCwd),
-				]);
-				diff = (staged.stdout || "") + "\n" + (unstaged.stdout || "");
-			} else {
-				const result = await execGit(["diff", "--cached", "--no-color"], commandCwd);
-				if (result.code !== 0) return;
-				diff = result.stdout;
-			}
-		} else {
-			// Push — check unpushed commits against upstream
-			const result = await execGit(["diff", "@{u}..HEAD", "--no-color"], commandCwd);
-			if (result.code !== 0) {
-				// No upstream configured — try common remote branch names
-				for (const ref of ["origin/main", "origin/master"]) {
-					const fallback = await execGit(["diff", `${ref}..HEAD`, "--no-color"], commandCwd);
-					if (fallback.code === 0) {
-						diff = fallback.stdout;
-						break;
-					}
-				}
-				// If we still have no diff, we can't determine what's being pushed.
-				// Fall through — if diff is empty, we'll skip the check.
-			} else {
-				diff = result.stdout;
-			}
+		const diff = await getDiffForAction(gitAction, commandCwd, command);
+		if (!diff.trim()) {
+			clearReviewState(stateFilePath);
+			return;
 		}
-
-		// Nothing to scan (empty commit, or no staged changes)
-		if (!diff.trim()) return;
-
-		// ── Check if this diff was already reviewed by the agent ─────────────
 
 		const currentHash = hashDiff(diff);
 		const reviewState = stateFilePath ? loadReviewState(stateFilePath) : null;
 
 		if (reviewState) {
 			const elapsed = Date.now() - reviewState.timestamp;
-			if (
+			const sameReview =
 				reviewState.repoRoot === repoRoot &&
 				reviewState.action === gitAction &&
 				reviewState.diffHash === currentHash &&
-				elapsed < REVIEW_TTL_MS
-			) {
-				// Same repo/action/diff, within TTL — already reviewed, allow it.
+				reviewState.command === normalizeCommand(command) &&
+				reviewState.status === "pending" &&
+				elapsed < REVIEW_TTL_MS;
+
+			if (sameReview && hasRecentMatchingReviewBlock(pi, gitAction, currentHash, command)) {
+				clearReviewState(stateFilePath);
+				if (ctx.hasUI) {
+					ctx.ui.notify(`✅ Secret Guard: allowing reviewed ${gitAction}`, "success");
+				}
 				return;
 			}
-			// Expired or changed — state will be replaced below.
-		}
 
-		// ── Phase 1: Regex scan ─────────────────────────────────────────────
+			if (!sameReview || elapsed >= REVIEW_TTL_MS) {
+				clearReviewState(stateFilePath);
+			}
+		}
 
 		const secretFindings = scanDiffForSecrets(diff);
 		const fileFindings = scanFileNames(diff);
 		const allFindings = [...secretFindings, ...fileFindings];
 
 		if (secretFindings.length > 0) {
-			// Hard block — regex found actual secret patterns
+			clearReviewState(stateFilePath);
 			const formatted = formatFindings(allFindings);
 
 			if (ctx.hasUI) {
@@ -240,9 +296,6 @@ export default function (pi: ExtensionAPI) {
 			};
 		}
 
-		// ── Phase 2: Agent review ───────────────────────────────────────────
-
-		// Truncate diff for context window
 		const truncation = truncateHead(diff, {
 			maxLines: DIFF_TRUNCATE_LINES,
 			maxBytes: DIFF_TRUNCATE_BYTES,
@@ -253,7 +306,6 @@ export default function (pi: ExtensionAPI) {
 			diffForReview += `\n\n[Diff truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
 		}
 
-		// File warnings (if any suspicious files but no secret content found)
 		let fileWarning = "";
 		if (fileFindings.length > 0) {
 			fileWarning = [
@@ -265,12 +317,12 @@ export default function (pi: ExtensionAPI) {
 			].join("\n");
 		}
 
-		// Store the diff hash so the agent can re-issue after review.
-		// Persist per-repo + per-action so other sessions/repos can't clobber it.
 		if (stateFilePath) {
 			saveReviewState(stateFilePath, {
 				repoRoot,
 				action: gitAction,
+				status: "pending",
+				command: normalizeCommand(command),
 				diffHash: currentHash,
 				timestamp: Date.now(),
 			});
@@ -280,6 +332,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`🔍 Secret Guard: reviewing ${gitAction} diff...`, "info");
 		}
 
+		const reviewMarker = makeReviewMarker(gitAction, currentHash, command);
 		return {
 			block: true,
 			reason: [
@@ -294,9 +347,11 @@ export default function (pi: ExtensionAPI) {
 				"  • Hardcoded secrets in config files",
 				"  • Any other sensitive data that should not be in a repository",
 				"",
-				`--- STAGED DIFF (${gitAction === "commit" ? "staged changes" : "unpushed commits"}) ---`,
+				`--- ${gitAction === "commit" ? "STAGED" : "UNPUSHED"} DIFF ---`,
 				diffForReview,
 				"--- END DIFF ---",
+				"",
+				`Review marker: ${reviewMarker}`,
 				"",
 				"After your review:",
 				`  ✅ If CLEAN → re-issue the exact same command: \`${command}\``,

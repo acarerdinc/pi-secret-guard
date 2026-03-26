@@ -153,19 +153,24 @@ const GIT_COMMIT_ALL_SEGMENT_RE = new RegExp(
 	`^\\s*${ENV_PREFIX_RE}git\\s+.*\\bcommit\\b.*(?:-a\\b|--all\\b|-[a-zA-Z]*a[a-zA-Z]*\\b)`,
 );
 
-function splitShellSegments(command: string): string[] {
+export function splitShellSegments(command: string): string[] {
 	return command
 		.split(/(?:&&|\|\||;|\n)/)
 		.map((segment) => segment.trim())
 		.filter(Boolean);
 }
 
-export function detectGitAction(command: string): "commit" | "push" | null {
+export function detectGitActions(command: string): Array<"commit" | "push"> {
+	const actions: Array<"commit" | "push"> = [];
 	for (const segment of splitShellSegments(command)) {
-		if (GIT_COMMIT_SEGMENT_RE.test(segment)) return "commit";
-		if (GIT_PUSH_SEGMENT_RE.test(segment)) return "push";
+		if (GIT_COMMIT_SEGMENT_RE.test(segment)) actions.push("commit");
+		if (GIT_PUSH_SEGMENT_RE.test(segment)) actions.push("push");
 	}
-	return null;
+	return actions;
+}
+
+export function detectGitAction(command: string): "commit" | "push" | null {
+	return detectGitActions(command)[0] ?? null;
 }
 
 export function isCommitAll(command: string): boolean {
