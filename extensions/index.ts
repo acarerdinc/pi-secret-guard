@@ -19,6 +19,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType, truncateHead, formatSize } from "@mariozechner/pi-coding-agent";
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import {
 	type ReviewState,
 	detectGitAction,
@@ -59,9 +60,6 @@ const DIFF_TRUNCATE_LINES = 500;
 const DIFF_TRUNCATE_BYTES = 30_000; // ~30KB — leaves room in context
 
 // File-based state file — survives across extension restarts and agent turns
-// Using static imports (not dynamic) to avoid import() issues in hot paths
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-
 const STATE_FILE = "/tmp/pi-secret-guard-review.json";
 
 function loadReviewState(): ReviewState | null {
