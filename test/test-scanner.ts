@@ -199,6 +199,13 @@ assert("detects env-prefixed git commit", detectGitAction("FOO=1 git commit -m '
 assert("ignores .git paths containing commit", detectGitAction("python - <<'PY'\nprint('/repo/.git/pi-secret-guard/review-commit.json')\nPY") === null);
 assert("ignores plain text mentioning git push", detectGitAction("echo 'please git push origin main later'") === null);
 
+// Shell-wrapped commands (bash -c, sh -c, etc.)
+assert('detects bash -c "git commit"', detectGitAction("bash -c \"git commit -m 'msg'\"") === "commit");
+assert('detects sh -c "git commit"', detectGitAction("sh -c 'git commit -m msg'") === "commit");
+assert('detects bash -c "git push"', detectGitAction("bash -c \"git push origin main\"") === "push");
+assert('detects sh -c "git push"', detectGitAction("sh -c 'git push origin main'") === "push");
+assert('detects bash -c git commit -am', detectGitAction("bash -c 'git commit -am \"Update\"'") === "commit");
+
 group("Git Commit -a Detection");
 
 assert('detects "git commit -a"', isCommitAll("git commit -a -m 'msg'") === true);
@@ -206,6 +213,9 @@ assert('detects "git commit -am"', isCommitAll("git commit -am 'msg'") === true)
 assert('detects "git commit --all"', isCommitAll("git commit --all -m 'msg'") === true);
 assert('detects "git commit -sam"', isCommitAll("git commit -sam 'msg'") === true);
 assert("no -a flag", isCommitAll("git commit -m 'msg'") === false);
+// Shell-wrapped commands
+assert('detects bash -c "git commit -am"', isCommitAll("bash -c 'git commit -am msg'") === true);
+assert('no -a flag in bash -c', isCommitAll("bash -c 'git commit -m msg'") === false);
 
 // ============================================================================
 // Tests: Diff Scanning

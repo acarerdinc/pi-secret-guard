@@ -147,10 +147,11 @@ export const SUSPICIOUS_FILE_PATTERNS: { name: string; pattern: RegExp }[] = [
 // ============================================================================
 
 const ENV_PREFIX_RE = "(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\\s'\";|&]+|'[^']*'|\"[^\"]*\")\\s+)*";
-const GIT_COMMIT_SEGMENT_RE = new RegExp(`^\\s*${ENV_PREFIX_RE}git\\s+.*\\bcommit\\b`);
-const GIT_PUSH_SEGMENT_RE = new RegExp(`^\\s*${ENV_PREFIX_RE}git\\s+.*\\bpush\\b`);
+const SHELL_WRAPPER_RE = "(?:bash|sh|zsh|fish|dash|ash|csh|tcsh)\\s+-(?:c|e)\\s+";
+const GIT_COMMIT_SEGMENT_RE = new RegExp(`^\\s*${ENV_PREFIX_RE}(?:${SHELL_WRAPPER_RE})?git\\s+.*\\bcommit\\b`);
+const GIT_PUSH_SEGMENT_RE = new RegExp(`^\\s*${ENV_PREFIX_RE}(?:${SHELL_WRAPPER_RE})?git\\s+.*\\bpush\\b`);
 const GIT_COMMIT_ALL_SEGMENT_RE = new RegExp(
-	`^\\s*${ENV_PREFIX_RE}git\\s+.*\\bcommit\\b.*(?:-a\\b|--all\\b|-[a-zA-Z]*a[a-zA-Z]*\\b)`,
+	`^\\s*${ENV_PREFIX_RE}(?:${SHELL_WRAPPER_RE})?git\\s+.*\\bcommit\\b.*(?:-a\\b|--all\\b|-[a-zA-Z]*a[a-zA-Z]*\\b)`,
 );
 
 function splitShellSegments(command: string): string[] {
@@ -160,16 +161,49 @@ function splitShellSegments(command: string): string[] {
 		.filter(Boolean);
 }
 
+/**
+ * Extract git command from shell-wrapped commands like `bash -c "git commit ..."`
+ */
+function extractGitFromShellWrapper(segment: string): string {
+	// Match patterns like:
+	// - bash -c "git commit ..."
+	// - sh -c 'git push ...'
+	// - bash -e "git commit -m 'msg'"
+	const wrapperMatch = segment.match(/^(?:\S+\s+)+-\s*c\s+['"](.+?)['"]\s*$/);
+	if (wrapperMatch) {
+		return wrapperMatch[1];
+	}
+	return segment;
+}
+
 export function detectGitAction(command: string): "commit" | "push" | null {
 	for (const segment of splitShellSegments(command)) {
+		// First try the direct regex match
 		if (GIT_COMMIT_SEGMENT_RE.test(segment)) return "commit";
 		if (GIT_PUSH_SEGMENT_RE.test(segment)) return "push";
+
+		// Then try extracting git command from shell wrappers
+		const extractedSegment = extractGitFromShellWrapper(segment);
+		if (extractedSegment !== segment) {
+			// Check the extracted command
+			if (GIT_COMMIT_SEGMENT_RE.test(extractedSegment)) return "commit";
+			if (GIT_PUSH_SEGMENT_RE.test(extractedSegment)) return "push";
+		}
 	}
 	return null;
 }
 
 export function isCommitAll(command: string): boolean {
-	return splitShellSegments(command).some((segment) => GIT_COMMIT_ALL_SEGMENT_RE.test(segment));
+	return splitShellSegments(command).some((segment) => {
+		// Direct check
+		if (GIT_COMMIT_ALL_SEGMENT_RE.test(segment)) return true;
+
+		// Check shell-wrapped commands
+		const extracted = extractGitFromShellWrapper(segment);
+		if (extracted !== segment && GIT_COMMIT_ALL_SEGMENT_RE.test(extracted)) return true;
+
+		return false;
+	});
 }
 
 // ============================================================================

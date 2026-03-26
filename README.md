@@ -76,6 +76,8 @@ Hardcoded passwords in config objects, database URLs with embedded credentials, 
 
 **`git push`** — scans unpushed commits via `@{u}..HEAD`, falls back to `origin/main` or `origin/master`.
 
+**Shell wrappers** — Detects git commands wrapped in `bash -c`, `sh -c`, `zsh -c`, etc.
+
 **Hard block** — regex finds a known secret pattern. Masks the secret in the output. Won't allow re-issue until the secret is removed.
 
 **Soft block** — regex is clean, agent reviews. If the agent says clean and re-issues, allowed through. If the diff changed between review and re-issue, requires fresh review.
