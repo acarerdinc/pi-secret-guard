@@ -12,7 +12,7 @@
 
 import { execSync } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import {
 	scanDiffForSecrets,
 	scanFileNames,
@@ -361,6 +361,31 @@ MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHBnQ
 	assert("Found private key", findings.some((f) => f.name === "Private Key"));
 	assert("Clean file not flagged", !findings.some((f) => f.file === "src/clean.ts"));
 	assert("At least 2 findings", findings.length >= 2);
+
+	cleanup();
+}
+
+// ============================================================================
+// Test Scenario 8: git --git-path may be relative from nested cwd
+// ============================================================================
+
+group("Scenario 8: git-path from nested cwd resolves correctly");
+{
+	setupRepo();
+
+	writeFile("src/nested/app.ts", 'console.log("hello");\n');
+	stageAll();
+
+	const nestedCwd = join(TEST_DIR, "src", "nested");
+	const rawGitPath = execSync("git rev-parse --git-path pi-secret-guard/review-commit.json", {
+		cwd: nestedCwd,
+		encoding: "utf-8",
+	}).trim();
+	const resolvedGitPath = isAbsolute(rawGitPath) ? rawGitPath : resolve(nestedCwd, rawGitPath);
+
+	assert("git --git-path returns a path", rawGitPath.length > 0);
+	assert("resolved git-path points inside the repo .git dir", resolvedGitPath.includes(`${TEST_DIR}/.git/`));
+	assert("nested cwd can produce a relative git-path", !isAbsolute(rawGitPath));
 
 	cleanup();
 }

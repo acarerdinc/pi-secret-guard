@@ -195,6 +195,9 @@ assert("detects compound command", detectGitAction("cd /app && git commit -am 'm
 assert("returns null for non-git", detectGitAction("echo hello") === null);
 assert("returns null for git status", detectGitAction("git status") === null);
 assert('detects "git push --force"', detectGitAction("git push --force origin main") === "push");
+assert("detects env-prefixed git commit", detectGitAction("FOO=1 git commit -m 'msg'") === "commit");
+assert("ignores .git paths containing commit", detectGitAction("python - <<'PY'\nprint('/repo/.git/pi-secret-guard/review-commit.json')\nPY") === null);
+assert("ignores plain text mentioning git push", detectGitAction("echo 'please git push origin main later'") === null);
 
 group("Git Commit -a Detection");
 

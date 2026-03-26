@@ -146,18 +146,30 @@ export const SUSPICIOUS_FILE_PATTERNS: { name: string; pattern: RegExp }[] = [
 // Git Command Detection
 // ============================================================================
 
-const GIT_COMMIT_RE = /\bgit\b.*\bcommit\b/;
-const GIT_PUSH_RE = /\bgit\b.*\bpush\b/;
-const GIT_COMMIT_ALL_RE = /\bgit\b.*\bcommit\b.*(?:-a\b|--all\b|-[a-zA-Z]*a[a-zA-Z]*\b)/;
+const ENV_PREFIX_RE = "(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\\s'\";|&]+|'[^']*'|\"[^\"]*\")\\s+)*";
+const GIT_COMMIT_SEGMENT_RE = new RegExp(`^\\s*${ENV_PREFIX_RE}git\\s+.*\\bcommit\\b`);
+const GIT_PUSH_SEGMENT_RE = new RegExp(`^\\s*${ENV_PREFIX_RE}git\\s+.*\\bpush\\b`);
+const GIT_COMMIT_ALL_SEGMENT_RE = new RegExp(
+	`^\\s*${ENV_PREFIX_RE}git\\s+.*\\bcommit\\b.*(?:-a\\b|--all\\b|-[a-zA-Z]*a[a-zA-Z]*\\b)`,
+);
+
+function splitShellSegments(command: string): string[] {
+	return command
+		.split(/(?:&&|\|\||;|\n)/)
+		.map((segment) => segment.trim())
+		.filter(Boolean);
+}
 
 export function detectGitAction(command: string): "commit" | "push" | null {
-	if (GIT_COMMIT_RE.test(command)) return "commit";
-	if (GIT_PUSH_RE.test(command)) return "push";
+	for (const segment of splitShellSegments(command)) {
+		if (GIT_COMMIT_SEGMENT_RE.test(segment)) return "commit";
+		if (GIT_PUSH_SEGMENT_RE.test(segment)) return "push";
+	}
 	return null;
 }
 
 export function isCommitAll(command: string): boolean {
-	return GIT_COMMIT_ALL_RE.test(command);
+	return splitShellSegments(command).some((segment) => GIT_COMMIT_ALL_SEGMENT_RE.test(segment));
 }
 
 // ============================================================================

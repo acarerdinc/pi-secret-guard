@@ -19,7 +19,8 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType, truncateHead, formatSize } from "@mariozechner/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
 import {
 	type ReviewState,
 	detectGitAction,
@@ -39,9 +40,12 @@ import {
  * Using direct spawn instead of pi.exec() to avoid re-entrant crashes
  * when the tool_call handler fires on a re-issued command.
  */
-function execGit(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+function execGit(
+	args: string[],
+	cwd: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((resolve) => {
-		const proc = spawn("git", args);
+		const proc = spawn("git", args, { cwd });
 		let stdout = "";
 		let stderr = "";
 		proc.stdout?.on("data", (d) => (stdout += d));
@@ -49,6 +53,76 @@ function execGit(args: string[]): Promise<{ code: number; stdout: string; stderr
 		proc.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
 		proc.on("error", (err) => resolve({ code: 1, stdout: "", stderr: String(err) }));
 	});
+}
+
+type GitAction = "commit" | "push";
+type PersistedReviewState = ReviewState & { action: GitAction; repoRoot: string };
+
+function stripQuotes(value: string): string {
+	const trimmed = value.trim();
+	if (
+		(trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+		(trimmed.startsWith("'") && trimmed.endsWith("'"))
+	) {
+		return trimmed.slice(1, -1);
+	}
+	return trimmed;
+}
+
+function getSessionCwd(pi: ExtensionAPI): string {
+	try {
+		return pi.sessionManager.getCwd() || process.cwd();
+	} catch {
+		return process.cwd();
+	}
+}
+
+/**
+ * Best-effort extraction of the command cwd for common patterns like:
+ *   cd /repo && git commit ...
+ * Falls back to the session cwd.
+ */
+function getCommandCwd(command: string, fallbackCwd: string): string {
+	const trimmed = command.trim();
+	const match = trimmed.match(/^cd\s+((?:"[^"]+"|'[^']+'|[^&;|])+?)\s*&&/);
+	if (!match) return fallbackCwd;
+	const rawPath = stripQuotes(match[1]);
+	if (!rawPath) return fallbackCwd;
+	return isAbsolute(rawPath) ? rawPath : resolve(fallbackCwd, rawPath);
+}
+
+async function getRepoRoot(cwd: string): Promise<string | null> {
+	const result = await execGit(["rev-parse", "--show-toplevel"], cwd);
+	if (result.code !== 0) return null;
+	const repoRoot = result.stdout.trim();
+	return repoRoot || null;
+}
+
+async function getStateFilePath(action: GitAction, cwd: string): Promise<string | null> {
+	const result = await execGit(["rev-parse", "--git-path", `pi-secret-guard/review-${action}.json`], cwd);
+	if (result.code !== 0) return null;
+	const gitPath = result.stdout.trim();
+	if (!gitPath) return null;
+	return isAbsolute(gitPath) ? gitPath : resolve(cwd, gitPath);
+}
+
+function loadReviewState(stateFilePath: string): PersistedReviewState | null {
+	try {
+		if (!existsSync(stateFilePath)) return null;
+		const raw = readFileSync(stateFilePath, "utf-8");
+		return JSON.parse(raw) as PersistedReviewState;
+	} catch {
+		return null;
+	}
+}
+
+function saveReviewState(stateFilePath: string, state: PersistedReviewState): void {
+	try {
+		mkdirSync(dirname(stateFilePath), { recursive: true });
+		writeFileSync(stateFilePath, JSON.stringify(state), "utf-8");
+	} catch {
+		// File write failed — state will only persist for this invocation.
+	}
 }
 
 // ============================================================================
@@ -59,27 +133,6 @@ const REVIEW_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const DIFF_TRUNCATE_LINES = 500;
 const DIFF_TRUNCATE_BYTES = 30_000; // ~30KB — leaves room in context
 
-// File-based state file — survives across extension restarts and agent turns
-const STATE_FILE = "/tmp/pi-secret-guard-review.json";
-
-function loadReviewState(): ReviewState | null {
-	try {
-		if (!existsSync(STATE_FILE)) return null;
-		const raw = readFileSync(STATE_FILE, "utf-8");
-		return JSON.parse(raw) as ReviewState;
-	} catch {
-		return null;
-	}
-}
-
-function saveReviewState(state: ReviewState): void {
-	try {
-		writeFileSync(STATE_FILE, JSON.stringify(state), "utf-8");
-	} catch {
-		// File write failed — state will only persist in this turn
-	}
-}
-
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (!isToolCallEventType("bash", event)) return;
@@ -87,6 +140,13 @@ export default function (pi: ExtensionAPI) {
 		const command = event.input.command;
 		const gitAction = detectGitAction(command);
 		if (!gitAction) return;
+
+		const sessionCwd = getSessionCwd(pi);
+		const commandCwd = getCommandCwd(command, sessionCwd);
+		const repoRoot = await getRepoRoot(commandCwd);
+		if (!repoRoot) return; // Not a git repo, let git handle it
+
+		const stateFilePath = await getStateFilePath(gitAction, commandCwd);
 
 		// ── Get the relevant diff ───────────────────────────────────────────
 
@@ -96,22 +156,22 @@ export default function (pi: ExtensionAPI) {
 			// For `git commit -a` / `--all`, include unstaged tracked changes too
 			if (isCommitAll(command)) {
 				const [staged, unstaged] = await Promise.all([
-					execGit(["diff", "--cached", "--no-color"]),
-					execGit(["diff", "--no-color"]),
+					execGit(["diff", "--cached", "--no-color"], commandCwd),
+					execGit(["diff", "--no-color"], commandCwd),
 				]);
 				diff = (staged.stdout || "") + "\n" + (unstaged.stdout || "");
 			} else {
-				const result = await execGit(["diff", "--cached", "--no-color"]);
-				if (result.code !== 0) return; // Not a git repo, let git handle it
+				const result = await execGit(["diff", "--cached", "--no-color"], commandCwd);
+				if (result.code !== 0) return;
 				diff = result.stdout;
 			}
 		} else {
 			// Push — check unpushed commits against upstream
-			const result = await execGit(["diff", "@{u}..HEAD", "--no-color"]);
+			const result = await execGit(["diff", "@{u}..HEAD", "--no-color"], commandCwd);
 			if (result.code !== 0) {
 				// No upstream configured — try common remote branch names
 				for (const ref of ["origin/main", "origin/master"]) {
-					const fallback = await execGit(["diff", `${ref}..HEAD`, "--no-color"]);
+					const fallback = await execGit(["diff", `${ref}..HEAD`, "--no-color"], commandCwd);
 					if (fallback.code === 0) {
 						diff = fallback.stdout;
 						break;
@@ -130,15 +190,20 @@ export default function (pi: ExtensionAPI) {
 		// ── Check if this diff was already reviewed by the agent ─────────────
 
 		const currentHash = hashDiff(diff);
-		const reviewState = loadReviewState();
+		const reviewState = stateFilePath ? loadReviewState(stateFilePath) : null;
 
 		if (reviewState) {
 			const elapsed = Date.now() - reviewState.timestamp;
-			if (reviewState.diffHash === currentHash && elapsed < REVIEW_TTL_MS) {
-				// Same diff, within TTL — agent already reviewed this, allow it
+			if (
+				reviewState.repoRoot === repoRoot &&
+				reviewState.action === gitAction &&
+				reviewState.diffHash === currentHash &&
+				elapsed < REVIEW_TTL_MS
+			) {
+				// Same repo/action/diff, within TTL — already reviewed, allow it.
 				return;
 			}
-			// Expired or diff changed — state will be replaced below
+			// Expired or changed — state will be replaced below.
 		}
 
 		// ── Phase 1: Regex scan ─────────────────────────────────────────────
@@ -200,9 +265,16 @@ export default function (pi: ExtensionAPI) {
 			].join("\n");
 		}
 
-		// Store the diff hash so the agent can re-issue after review
-		// Persists to disk so it survives extension re-initialization
-		saveReviewState({ diffHash: currentHash, timestamp: Date.now() });
+		// Store the diff hash so the agent can re-issue after review.
+		// Persist per-repo + per-action so other sessions/repos can't clobber it.
+		if (stateFilePath) {
+			saveReviewState(stateFilePath, {
+				repoRoot,
+				action: gitAction,
+				diffHash: currentHash,
+				timestamp: Date.now(),
+			});
+		}
 
 		if (ctx.hasUI) {
 			ctx.ui.notify(`🔍 Secret Guard: reviewing ${gitAction} diff...`, "info");
