@@ -25,6 +25,7 @@ import {
 	type ReviewState,
 	detectGitAction,
 	isCommitAll,
+	extractGitAddFiles,
 	hashDiff,
 	scanDiffForSecrets,
 	scanFileNames,
@@ -125,6 +126,39 @@ function saveReviewState(stateFilePath: string, state: PersistedReviewState): vo
 	}
 }
 
+/**
+ * Build a synthetic diff from file contents for files being added via git add.
+ * This is needed when git add and git commit are in the same command -
+ * the staged diff is empty when we check because git add hasn't run yet.
+ */
+function buildDiffFromFiles(
+	files: string[],
+	cwd: string,
+): string {
+	const lines: string[] = [];
+
+	for (const file of files) {
+		const filePath = resolve(cwd, file);
+		if (!existsSync(filePath)) continue;
+
+		try {
+			const content = readFileSync(filePath, "utf-8");
+			lines.push(`diff --git a/${file} b/${file}`);
+			lines.push(`--- /dev/null`);
+			lines.push(`+++ b/${file}`);
+			lines.push(`@@ -0,0 +1,${content.split("\n").length} @@`);
+
+			for (const line of content.split("\n")) {
+				lines.push(`+${line}`);
+			}
+		} catch {
+			// Skip files we can't read
+		}
+	}
+
+	return lines.join("\n");
+}
+
 // ============================================================================
 // Extension
 // ============================================================================
@@ -164,6 +198,16 @@ export default function (pi: ExtensionAPI) {
 				const result = await execGit(["diff", "--cached", "--no-color"], commandCwd);
 				if (result.code !== 0) return;
 				diff = result.stdout;
+			}
+
+			// If staged diff is empty but git add is in the command,
+			// scan the files being added directly.
+			// This handles compound commands like "git add .env && git commit"
+			if (!diff.trim()) {
+				const addFiles = extractGitAddFiles(command);
+				if (addFiles.length > 0) {
+					diff = buildDiffFromFiles(addFiles, commandCwd);
+				}
 			}
 		} else {
 			// Push — check unpushed commits against upstream

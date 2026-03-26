@@ -153,12 +153,52 @@ const GIT_PUSH_SEGMENT_RE = new RegExp(`^\\s*${ENV_PREFIX_RE}(?:${SHELL_WRAPPER_
 const GIT_COMMIT_ALL_SEGMENT_RE = new RegExp(
 	`^\\s*${ENV_PREFIX_RE}(?:${SHELL_WRAPPER_RE})?git\\s+.*\\bcommit\\b.*(?:-a\\b|--all\\b|-[a-zA-Z]*a[a-zA-Z]*\\b)`,
 );
+const GIT_ADD_SEGMENT_RE = new RegExp(`^\\s*${ENV_PREFIX_RE}(?:${SHELL_WRAPPER_RE})?git\\s+add\\b`);
 
 function splitShellSegments(command: string): string[] {
 	return command
 		.split(/(?:&&|\|\||;|\n)/)
 		.map((segment) => segment.trim())
 		.filter(Boolean);
+}
+
+/**
+ * Extract files that would be added by git add commands in the command line.
+ * Handles patterns like: git add .env, git add ., git add src/*.ts, etc.
+ */
+function extractGitAddFiles(command: string): string[] {
+	const segments = splitShellSegments(command);
+	const files: string[] = [];
+
+	for (const segment of segments) {
+		// Check if this segment is a git add command
+		if (!GIT_ADD_SEGMENT_RE.test(segment)) continue;
+
+		// Extract the inner command if wrapped in shell
+		const innerSegment = extractGitFromShellWrapper(segment);
+
+		// Parse the git add command to extract file arguments
+		// Match: git add <options> <files...>
+		const addMatch = innerSegment.match(/git\s+add\s+(.+)/);
+		if (!addMatch) continue;
+
+		const addArgs = addMatch[1];
+		// Skip if -u (update) or -A/--all flags are used (we'll use diff instead)
+		if (/\s-[uA]|\s--all|\s--update\b/.test(addArgs)) continue;
+
+		// Extract file patterns (everything that's not a flag)
+		const filePatternMatch = addArgs.match(/(?:^|\s)([^-\s][^\s]*)/g);
+		if (filePatternMatch) {
+			for (const pattern of filePatternMatch) {
+				const trimmed = pattern.trim();
+				// Skip flag values and options
+				if (trimmed.startsWith("-")) continue;
+				files.push(trimmed);
+			}
+		}
+	}
+
+	return files;
 }
 
 /**
