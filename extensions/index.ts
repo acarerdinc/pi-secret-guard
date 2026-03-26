@@ -57,11 +57,39 @@ function execGit(args: string[]): Promise<{ code: number; stdout: string; stderr
 const REVIEW_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const DIFF_TRUNCATE_LINES = 500;
 const DIFF_TRUNCATE_BYTES = 30_000; // ~30KB — leaves room in context
+const REVIEW_ENTRY_TYPE = "pi-secret-guard-review";
+
+/**
+ * Loads the most recent review state from session entries.
+ * This persists across extension re-initializations between agent turns.
+ */
+function loadReviewState(): ReviewState | null {
+	try {
+		const entries = pi.sessionManager.getEntries();
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry?.type === "custom" && entry?.customType === REVIEW_ENTRY_TYPE) {
+				return (entry as any).data as ReviewState;
+			}
+		}
+	} catch {
+		// sessionManager not available in some contexts
+	}
+	return null;
+}
+
+/**
+ * Saves the review state to session entries for persistence across agent turns.
+ */
+function saveReviewState(state: ReviewState): void {
+	try {
+		pi.appendEntry(REVIEW_ENTRY_TYPE, state);
+	} catch {
+		// appendEntry not available in some contexts
+	}
+}
 
 export default function (pi: ExtensionAPI) {
-	// State: tracks the diff hash of the last agent-reviewed diff
-	let reviewState: ReviewState | null = null;
-
 	pi.on("tool_call", async (event, ctx) => {
 		if (!isToolCallEventType("bash", event)) return;
 
@@ -111,16 +139,15 @@ export default function (pi: ExtensionAPI) {
 		// ── Check if this diff was already reviewed by the agent ─────────────
 
 		const currentHash = hashDiff(diff);
+		const reviewState = loadReviewState();
 
 		if (reviewState) {
 			const elapsed = Date.now() - reviewState.timestamp;
 			if (reviewState.diffHash === currentHash && elapsed < REVIEW_TTL_MS) {
 				// Same diff, within TTL — agent already reviewed this, allow it
-				reviewState = null;
 				return;
 			}
-			// Expired or diff changed — clear stale state
-			reviewState = null;
+			// Expired or diff changed — state will be replaced below
 		}
 
 		// ── Phase 1: Regex scan ─────────────────────────────────────────────
@@ -183,7 +210,8 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// Store the diff hash so the agent can re-issue after review
-		reviewState = { diffHash: currentHash, timestamp: Date.now() };
+		// Use session-based persistence so it survives extension re-initialization
+		saveReviewState({ diffHash: currentHash, timestamp: Date.now() });
 
 		if (ctx.hasUI) {
 			ctx.ui.notify(`🔍 Secret Guard: reviewing ${gitAction} diff...`, "info");
