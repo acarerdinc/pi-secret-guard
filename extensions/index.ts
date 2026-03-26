@@ -57,35 +57,28 @@ function execGit(args: string[]): Promise<{ code: number; stdout: string; stderr
 const REVIEW_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const DIFF_TRUNCATE_LINES = 500;
 const DIFF_TRUNCATE_BYTES = 30_000; // ~30KB — leaves room in context
-const REVIEW_ENTRY_TYPE = "pi-secret-guard-review";
 
-/**
- * Loads the most recent review state from session entries.
- * This persists across extension re-initializations between agent turns.
- */
+// File-based state file — survives across extension restarts and agent turns
+// Using static imports (not dynamic) to avoid import() issues in hot paths
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+
+const STATE_FILE = "/tmp/pi-secret-guard-review.json";
+
 function loadReviewState(): ReviewState | null {
 	try {
-		const entries = pi.sessionManager.getEntries();
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i];
-			if (entry?.type === "custom" && entry?.customType === REVIEW_ENTRY_TYPE) {
-				return (entry as any).data as ReviewState;
-			}
-		}
+		if (!existsSync(STATE_FILE)) return null;
+		const raw = readFileSync(STATE_FILE, "utf-8");
+		return JSON.parse(raw) as ReviewState;
 	} catch {
-		// sessionManager not available in some contexts
+		return null;
 	}
-	return null;
 }
 
-/**
- * Saves the review state to session entries for persistence across agent turns.
- */
 function saveReviewState(state: ReviewState): void {
 	try {
-		pi.appendEntry(REVIEW_ENTRY_TYPE, state);
+		writeFileSync(STATE_FILE, JSON.stringify(state), "utf-8");
 	} catch {
-		// appendEntry not available in some contexts
+		// File write failed — state will only persist in this turn
 	}
 }
 
@@ -210,7 +203,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// Store the diff hash so the agent can re-issue after review
-		// Use session-based persistence so it survives extension re-initialization
+		// Persists to disk so it survives extension re-initialization
 		saveReviewState({ diffHash: currentHash, timestamp: Date.now() });
 
 		if (ctx.hasUI) {
