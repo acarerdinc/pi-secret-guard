@@ -18,6 +18,7 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType, truncateHead, formatSize } from "@mariozechner/pi-coding-agent";
+import { spawn } from "node:child_process";
 import {
 	type ReviewState,
 	detectGitAction,
@@ -29,41 +30,37 @@ import {
 } from "./scanner.ts";
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/**
+ * Spawns a process and returns stdout/stderr.
+ * Using direct spawn instead of pi.exec() to avoid re-entrant crashes
+ * when the tool_call handler fires on a re-issued command.
+ */
+function execGit(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+	return new Promise((resolve) => {
+		const proc = spawn("git", args);
+		let stdout = "";
+		let stderr = "";
+		proc.stdout?.on("data", (d) => (stdout += d));
+		proc.stderr?.on("data", (d) => (stderr += d));
+		proc.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+		proc.on("error", (err) => resolve({ code: 1, stdout: "", stderr: String(err) }));
+	});
+}
+
+// ============================================================================
 // Extension
 // ============================================================================
 
 const REVIEW_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const DIFF_TRUNCATE_LINES = 500;
 const DIFF_TRUNCATE_BYTES = 30_000; // ~30KB — leaves room in context
-const REVIEW_ENTRY_TYPE = "pi-secret-guard-review";
 
 export default function (pi: ExtensionAPI) {
-	// ── Load persisted review state from session ───────────────────────────
-	// The extension may be re-initialized between tool calls, so we read
-	// the state from session entries instead of relying on closure variables.
-	function loadReviewState(): ReviewState | null {
-		const entries = pi.sessionManager.getEntries();
-		// Find the most recent review state entry
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i];
-			if (entry?.type === "custom" && entry?.customType === REVIEW_ENTRY_TYPE) {
-				const data = (entry as any).data as ReviewState;
-				if (data?.diffHash && data?.timestamp) {
-					return data;
-				}
-			}
-		}
-		return null;
-	}
-
-	// ── Save review state to session ──────────────────────────────────────
-	function saveReviewState(state: ReviewState): void {
-		pi.appendEntry(REVIEW_ENTRY_TYPE, state);
-	}
-
-	// ── Clear review state from session ───────────────────────────────────
-	// We don't actually delete entries, but we mark the state as expired
-	// by not creating new entries. The TTL check handles expiration.
+	// State: tracks the diff hash of the last agent-reviewed diff
+	let reviewState: ReviewState | null = null;
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (!isToolCallEventType("bash", event)) return;
@@ -80,22 +77,22 @@ export default function (pi: ExtensionAPI) {
 			// For `git commit -a` / `--all`, include unstaged tracked changes too
 			if (isCommitAll(command)) {
 				const [staged, unstaged] = await Promise.all([
-					pi.exec("git", ["diff", "--cached", "--no-color"]),
-					pi.exec("git", ["diff", "--no-color"]),
+					execGit(["diff", "--cached", "--no-color"]),
+					execGit(["diff", "--no-color"]),
 				]);
 				diff = (staged.stdout || "") + "\n" + (unstaged.stdout || "");
 			} else {
-				const result = await pi.exec("git", ["diff", "--cached", "--no-color"]);
+				const result = await execGit(["diff", "--cached", "--no-color"]);
 				if (result.code !== 0) return; // Not a git repo, let git handle it
 				diff = result.stdout;
 			}
 		} else {
 			// Push — check unpushed commits against upstream
-			const result = await pi.exec("git", ["diff", "@{u}..HEAD", "--no-color"]);
+			const result = await execGit(["diff", "@{u}..HEAD", "--no-color"]);
 			if (result.code !== 0) {
 				// No upstream configured — try common remote branch names
 				for (const ref of ["origin/main", "origin/master"]) {
-					const fallback = await pi.exec("git", ["diff", `${ref}..HEAD`, "--no-color"]);
+					const fallback = await execGit(["diff", `${ref}..HEAD`, "--no-color"]);
 					if (fallback.code === 0) {
 						diff = fallback.stdout;
 						break;
@@ -114,15 +111,16 @@ export default function (pi: ExtensionAPI) {
 		// ── Check if this diff was already reviewed by the agent ─────────────
 
 		const currentHash = hashDiff(diff);
-		const reviewState = loadReviewState();
 
 		if (reviewState) {
 			const elapsed = Date.now() - reviewState.timestamp;
 			if (reviewState.diffHash === currentHash && elapsed < REVIEW_TTL_MS) {
 				// Same diff, within TTL — agent already reviewed this, allow it
+				reviewState = null;
 				return;
 			}
-			// Expired or diff changed — continue to re-check
+			// Expired or diff changed — clear stale state
+			reviewState = null;
 		}
 
 		// ── Phase 1: Regex scan ─────────────────────────────────────────────
@@ -185,8 +183,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// Store the diff hash so the agent can re-issue after review
-		// Use appendEntry to persist in session (survives extension re-initialization)
-		saveReviewState({ diffHash: currentHash, timestamp: Date.now() });
+		reviewState = { diffHash: currentHash, timestamp: Date.now() };
 
 		if (ctx.hasUI) {
 			ctx.ui.notify(`🔍 Secret Guard: reviewing ${gitAction} diff...`, "info");
