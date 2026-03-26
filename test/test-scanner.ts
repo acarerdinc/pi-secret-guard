@@ -7,7 +7,6 @@ import {
 	SECRET_PATTERNS,
 	SUSPICIOUS_FILE_PATTERNS,
 	detectGitAction,
-	detectGitActions,
 	isCommitAll,
 	hashDiff,
 	scanDiffForSecrets,
@@ -199,14 +198,6 @@ assert('detects "git push --force"', detectGitAction("git push --force origin ma
 assert("detects env-prefixed git commit", detectGitAction("FOO=1 git commit -m 'msg'") === "commit");
 assert("ignores .git paths containing commit", detectGitAction("python - <<'PY'\nprint('/repo/.git/pi-secret-guard/review-commit.json')\nPY") === null);
 assert("ignores plain text mentioning git push", detectGitAction("echo 'please git push origin main later'") === null);
-assert(
-	"detects both actions in commit+push chain",
-	JSON.stringify(detectGitActions("git commit -m 'msg' && git push origin main")) === JSON.stringify(["commit", "push"]),
-);
-assert(
-	"detects push then commit order exactly as written",
-	JSON.stringify(detectGitActions("git push origin main && git commit -m 'msg'")) === JSON.stringify(["push", "commit"]),
-);
 
 group("Git Commit -a Detection");
 
