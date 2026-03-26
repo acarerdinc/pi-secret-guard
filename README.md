@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/pi-secret-guard)](https://www.npmjs.com/package/pi-secret-guard)
 [![license](https://img.shields.io/npm/l/pi-secret-guard)](./LICENSE)
 
-Catches secrets before they reach git. Regex scan for known patterns, then the agent reviews the diff for anything subtle.
+Catches secrets before they reach git. Regex scan for known patterns, then the agent reviews the diff for anything suspicious.
 
 A [pi](https://github.com/badlogic/pi-mono) extension.
 
