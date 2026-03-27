@@ -7,8 +7,15 @@
     "pi-package",
     "pi-extension",
     "pi",
+    "git",
+    "github",
     "secret-scanning",
-    "security"
+    "secret-detection",
+    "api-key",
+    "security",
+    "pre-commit",
+    "devops",
+    "security-tools"
   ],
   "license": "MIT",
   "author": "acarerdinc",
