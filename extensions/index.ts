@@ -99,12 +99,17 @@ async function getRepoRoot(cwd: string): Promise<string | null> {
 	return repoRoot || null;
 }
 
-async function getStateFilePath(action: GitAction, cwd: string): Promise<string | null> {
+async function getStateFilePath(action: GitAction, cwd: string, repoRoot: string): Promise<string | null> {
+	// Try to use git's git-path first (respects GIT_DIR env var)
 	const result = await execGit(["rev-parse", "--git-path", `pi-secret-guard/review-${action}.json`], cwd);
-	if (result.code !== 0) return null;
-	const gitPath = result.stdout.trim();
-	if (!gitPath) return null;
-	return isAbsolute(gitPath) ? gitPath : resolve(cwd, gitPath);
+	if (result.code === 0 && result.stdout.trim()) {
+		const gitPath = result.stdout.trim();
+		return isAbsolute(gitPath) ? gitPath : resolve(cwd, gitPath);
+	}
+
+	// Fallback: use .git directory in repo root
+	const fallbackPath = resolve(repoRoot, ".git", "pi-secret-guard", `review-${action}.json`);
+	return fallbackPath;
 }
 
 function loadReviewState(stateFilePath: string): PersistedReviewState | null {
@@ -180,7 +185,7 @@ export default function (pi: ExtensionAPI) {
 		const repoRoot = await getRepoRoot(commandCwd);
 		if (!repoRoot) return; // Not a git repo, let git handle it
 
-		const stateFilePath = await getStateFilePath(gitAction, commandCwd);
+		const stateFilePath = await getStateFilePath(gitAction, commandCwd, repoRoot);
 
 		// ── Get the relevant diff ───────────────────────────────────────────
 
