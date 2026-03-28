@@ -104,7 +104,8 @@ async function getStateFilePath(action: GitAction, cwd: string, repoRoot: string
 	const result = await execGit(["rev-parse", "--git-path", `pi-secret-guard/review-${action}.json`], cwd);
 	if (result.code === 0 && result.stdout.trim()) {
 		const gitPath = result.stdout.trim();
-		return isAbsolute(gitPath) ? gitPath : resolve(cwd, gitPath);
+		// git-path returns relative to repo root, so resolve against repoRoot
+		return isAbsolute(gitPath) ? gitPath : resolve(repoRoot, gitPath);
 	}
 
 	// Fallback: use .git directory in repo root
