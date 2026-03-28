@@ -243,15 +243,20 @@ export default function (pi: ExtensionAPI) {
 		const reviewState = stateFilePath ? loadReviewState(stateFilePath) : null;
 
 		if (reviewState) {
+		}
+
+		if (reviewState) {
 			const elapsed = Date.now() - reviewState.timestamp;
-			if (
-				reviewState.repoRoot === repoRoot &&
-				reviewState.action === gitAction &&
-				reviewState.diffHash === currentHash &&
-				elapsed < REVIEW_TTL_MS
-			) {
+			const checks = {
+				repoRootMatch: reviewState.repoRoot === repoRoot,
+				actionMatch: reviewState.action === gitAction,
+				hashMatch: reviewState.diffHash === currentHash,
+				withinTTL: elapsed < REVIEW_TTL_MS
+			};
+
+			if (checks.repoRootMatch && checks.actionMatch && checks.hashMatch && checks.withinTTL) {
 				// Same repo/action/diff, within TTL — already reviewed, allow it.
-				return;
+				return { block: false };
 			}
 			// Expired or changed — state will be replaced below.
 		}
