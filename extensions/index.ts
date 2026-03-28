@@ -47,11 +47,17 @@ function execGit(
 ): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((resolve) => {
 		const proc = spawn("git", args, { cwd });
-		let stdout = "";
-		let stderr = "";
-		proc.stdout?.on("data", (d) => (stdout += d));
-		proc.stderr?.on("data", (d) => (stderr += d));
-		proc.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+		const stdoutChunks: Buffer[] = [];
+		const stderrChunks: Buffer[] = [];
+		proc.stdout?.on("data", (d: Buffer) => stdoutChunks.push(d));
+		proc.stderr?.on("data", (d: Buffer) => stderrChunks.push(d));
+		proc.on("close", (code) =>
+			resolve({
+				code: code ?? 1,
+				stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+				stderr: Buffer.concat(stderrChunks).toString("utf8"),
+			}),
+		);
 		proc.on("error", (err) => resolve({ code: 1, stdout: "", stderr: String(err) }));
 	});
 }
@@ -243,15 +249,12 @@ export default function (pi: ExtensionAPI) {
 		const reviewState = stateFilePath ? loadReviewState(stateFilePath) : null;
 
 		if (reviewState) {
-		}
-
-		if (reviewState) {
 			const elapsed = Date.now() - reviewState.timestamp;
 			const checks = {
 				repoRootMatch: reviewState.repoRoot === repoRoot,
 				actionMatch: reviewState.action === gitAction,
 				hashMatch: reviewState.diffHash === currentHash,
-				withinTTL: elapsed < REVIEW_TTL_MS
+				withinTTL: elapsed < REVIEW_TTL_MS,
 			};
 
 			if (checks.repoRootMatch && checks.actionMatch && checks.hashMatch && checks.withinTTL) {

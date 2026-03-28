@@ -166,7 +166,7 @@ function splitShellSegments(command: string): string[] {
  * Extract files that would be added by git add commands in the command line.
  * Handles patterns like: git add .env, git add ., git add src/*.ts, etc.
  */
-function extractGitAddFiles(command: string): string[] {
+export function extractGitAddFiles(command: string): string[] {
 	const segments = splitShellSegments(command);
 	const files: string[] = [];
 
