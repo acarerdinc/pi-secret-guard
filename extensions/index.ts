@@ -30,6 +30,7 @@ import {
 	scanDiffForSecrets,
 	scanFileNames,
 	formatFindings,
+	isGenericSecretFinding,
 } from "./scanner.ts";
 
 // ============================================================================
@@ -171,6 +172,13 @@ function buildDiffFromFiles(
 	return lines.join("\n");
 }
 
+function formatFindingForPrompt(finding: { name: string; file?: string; snippet?: string }): string {
+	const parts = [`Pattern: ${finding.name}`];
+	if (finding.file) parts.push(`File: ${finding.file}`);
+	if (finding.snippet) parts.push(`Snippet: ${finding.snippet}`);
+	return parts.join("\n");
+}
+
 // ============================================================================
 // Extension
 // ============================================================================
@@ -268,41 +276,103 @@ export default function (pi: ExtensionAPI) {
 
 		const secretFindings = scanDiffForSecrets(diff);
 		const fileFindings = scanFileNames(diff);
-		const allFindings = [...secretFindings, ...fileFindings];
+		let approvedGenericWarning = "";
 
 		if (secretFindings.length > 0) {
-			// Hard block — regex found actual secret patterns
-			const formatted = formatFindings(allFindings);
+			const genericFindings = secretFindings.filter(isGenericSecretFinding);
+			const hardBlockFindings = secretFindings.filter((finding) => !isGenericSecretFinding(finding));
+
+			if (hardBlockFindings.length > 0) {
+				// Hard block — regex found high-confidence secret patterns
+				const formatted = formatFindings([...hardBlockFindings, ...fileFindings]);
+
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						`🚨 Secret Guard blocked ${gitAction}: ${hardBlockFindings.length} high-confidence secret(s) found`,
+						"error",
+					);
+				}
+
+				return {
+					block: true,
+					reason: [
+						`🚨🚨🚨 SECRET GUARD: HARD BLOCK 🚨🚨🚨`,
+						``,
+						`Found ${hardBlockFindings.length} high-confidence secret(s) in ${gitAction === "commit" ? "staged" : "unpushed"} changes.`,
+						``,
+						formatted,
+						``,
+						`⚠️  SECURITY POLICY: This block CANNOT be bypassed.`,
+						`⚠️  Do NOT attempt to work around this block.`,
+						`⚠️  Do NOT try git commit --no-verify or any other workaround.`,
+						`⚠️  Do NOT suggest or implement ways to disable this protection.`,
+						``,
+						`Required actions:`,
+						`  1. Remove or rotate the detected secrets from the files`,
+						`  2. Update the commit/push command to exclude the problematic files`,
+						`  3. Explain to the user what was found and how to fix it`,
+						``,
+						`Do NOT re-issue this command until the secrets are properly removed.`,
+					].join("\n"),
+				};
+			}
+
+			if (!ctx.hasUI) {
+				return {
+					block: true,
+					reason: [
+						`🚨 SECRET GUARD: USER REVIEW REQUIRED`,
+						``,
+						`Found ${genericFindings.length} generic secret-pattern finding(s), but no interactive UI is available to approve them.`,
+						``,
+						formatFindings([...genericFindings, ...fileFindings]),
+					].join("\n"),
+				};
+			}
+
+			for (const finding of genericFindings) {
+				const choice = await ctx.ui.select(
+					[
+						`⚠️ Secret Guard found a generic secret-pattern match.`,
+						``,
+						formatFindingForPrompt(finding),
+						``,
+						`Generic patterns can be false positives, but may still be real credentials. Allow this ${gitAction} to proceed past this finding?`,
+					].join("\n"),
+					["Allow", "Block"],
+				);
+
+				if (choice !== "Allow") {
+					return {
+						block: true,
+						reason: [
+							`🚨 SECRET GUARD: BLOCKED BY USER`,
+							``,
+							`User rejected a generic secret-pattern finding.`,
+							``,
+							formatFindingForPrompt(finding),
+						].join("\n"),
+					};
+				}
+			}
 
 			if (ctx.hasUI) {
 				ctx.ui.notify(
-					`🚨 Secret Guard blocked ${gitAction}: ${secretFindings.length} secret(s) found`,
-					"error",
+					`⚠️ Secret Guard: user approved ${genericFindings.length} generic finding(s) for ${gitAction}`,
+					"warning",
 				);
 			}
 
-			return {
-				block: true,
-				reason: [
-					`🚨🚨🚨 SECRET GUARD: HARD BLOCK 🚨🚨🚨`,
-					``,
-					`Found ${secretFindings.length} potential secret(s) in ${gitAction === "commit" ? "staged" : "unpushed"} changes.`,
-					``,
-					formatted,
-					``,
-					`⚠️  SECURITY POLICY: This block CANNOT be bypassed.`,
-					`⚠️  Do NOT attempt to work around this block.`,
-					`⚠️  Do NOT try git commit --no-verify or any other workaround.`,
-					`⚠️  Do NOT suggest or implement ways to disable this protection.`,
-					``,
-					`Required actions:`,
-					`  1. Remove or rotate the detected secrets from the files`,
-					`  2. Update the commit/push command to exclude the problematic files`,
-					`  3. Explain to the user what was found and how to fix it`,
-					``,
-					`Do NOT re-issue this command until the secrets are properly removed.`,
-				].join("\n"),
-			};
+			if (fileFindings.length === 0) {
+				return { block: false };
+			}
+
+			approvedGenericWarning = [
+				"",
+				`⚠️ The user approved ${genericFindings.length} generic secret-pattern finding(s).`,
+				"Those generic matches are not hard-blocking, but the suspicious file warnings below still require agent review.",
+				"",
+			].join("\n");
 		}
 
 		// ── Phase 2: Agent review ───────────────────────────────────────────
@@ -319,9 +389,9 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// File warnings (if any suspicious files but no secret content found)
-		let fileWarning = "";
+		let fileWarning = approvedGenericWarning;
 		if (fileFindings.length > 0) {
-			fileWarning = [
+			fileWarning += [
 				"",
 				"⚠️ Additionally, these suspicious files are included:",
 				...fileFindings.map((f) => `  • ${f.file} (${f.name})`),

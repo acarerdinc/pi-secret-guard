@@ -27,6 +27,17 @@ export interface ReviewState {
 	timestamp: number;
 }
 
+export const GENERIC_SECRET_PATTERN_NAMES = new Set([
+	"Generic API Key Assignment",
+	"Generic Secret Assignment",
+	"Generic Password Assignment",
+	"Generic Token Assignment",
+]);
+
+export function isGenericSecretFinding(finding: Finding): boolean {
+	return finding.type === "secret" && GENERIC_SECRET_PATTERN_NAMES.has(finding.name);
+}
+
 // ============================================================================
 // Secret Patterns — ordered by specificity (most specific first)
 // ============================================================================
