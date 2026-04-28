@@ -12,6 +12,7 @@ import {
 	scanDiffForSecrets,
 	scanFileNames,
 	formatFindings,
+	isGenericSecretFinding,
 } from "../extensions/scanner.ts";
 
 // ============================================================================
@@ -182,6 +183,29 @@ assertMatch(
 // Should NOT match short values
 assertNoMatch("Generic Password Assignment", "password = short");
 assertNoMatch("Generic API Key Assignment", "api_key = abc");
+
+group("Generic Finding Classification");
+{
+	const genericApiKeyAssignment = `${["const api", "key"].join("_")} = "${"abcdefghijklmnopqrstuvwxyz"}1234";`;
+	const diff = makeDiff([
+		{
+			path: "src/config.ts",
+			addedLines: [
+				genericApiKeyAssignment,
+				`const openAiKey = ${fakeOpenAi1};`,
+			],
+		},
+	]);
+	const findings = scanDiffForSecrets(diff);
+	const genericFinding = findings.find((finding) => finding.name === "Generic API Key Assignment");
+	const highConfidenceFinding = findings.find((finding) => finding.name === "OpenAI API Key");
+
+	assert("Generic API key finding is user-reviewable", genericFinding !== undefined && isGenericSecretFinding(genericFinding));
+	assert(
+		"Provider-specific key finding is not user-reviewable",
+		highConfidenceFinding !== undefined && !isGenericSecretFinding(highConfidenceFinding),
+	);
+}
 
 // ============================================================================
 // Tests: Git Command Detection

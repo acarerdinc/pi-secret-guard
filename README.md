@@ -28,10 +28,15 @@ git commit / git push
 └──────┬───────────┘
        │
        ▼
-┌──────────────────┐    Regex hit
-│ Phase 1: Regex   │ ─────────────► 🚨 Hard block (must fix)
+┌──────────────────┐    High-confidence regex hit
+│ Phase 1: Regex   │ ───────────────────────────► 🚨 Hard block (must fix)
 └──────┬───────────┘
-       │ Clean
+       │ Generic hit only
+       ▼
+┌──────────────────┐    User rejects finding
+│ User review      │ ───────────────────────────► 🚫 Block
+└──────┬───────────┘
+       │ User approves / regex clean
        ▼
 ┌──────────────────┐    Agent finds secrets
 │ Phase 2: Agent   │ ─────────────► 🚫 Explains + helps fix
@@ -43,7 +48,7 @@ git commit / git push
   the command      ──► ✅ Allowed (diff hash verified)
 ```
 
-**Phase 1** is fast and free — regex against 30+ known secret formats.
+**Phase 1** is fast and free — regex against 30+ known secret formats. High-confidence matches hard-block immediately. Broad generic assignment matches prompt the user because they can be false positives.
 
 **Phase 2** uses the agent already in your session. No extra API calls or config. The agent has full project context, so it can tell whether `auth: "Tr0ub4dor&3"` in a config object is a real password or a test fixture.
 
@@ -51,7 +56,7 @@ When the agent re-issues a blocked command, the extension verifies the diff hasn
 
 ## What It Catches
 
-### Regex Patterns (instant block)
+### Regex Patterns
 
 | Category | Examples |
 |----------|----------|
@@ -60,7 +65,7 @@ When the agent re-issues a blocked command, the extension verifies the diff hasn
 | VCS tokens | GitHub (`ghp_`, `gho_`, `ghs_`, `github_pat_`), GitLab (`glpat-`), Bitbucket (`ATBB`) |
 | Private keys | RSA, EC, DSA, OpenSSH, PGP headers |
 | Auth | JWTs, credentials in URLs, database connection strings with passwords |
-| Generic | Assignments to `api_key`, `secret`, `password`, `token` variables with long values |
+| Generic | Assignments to `api_key`, `secret`, `password`, `token` variables with long values (user-confirmable) |
 
 ### Suspicious Files (flagged for review)
 
@@ -78,7 +83,9 @@ Hardcoded passwords in config objects, database URLs with embedded credentials, 
 
 **Shell wrappers** — Detects git commands wrapped in `bash -c`, `sh -c`, `zsh -c`, etc.
 
-**Hard block** — regex finds a known secret pattern. Masks the secret in the output. Won't allow re-issue until the secret is removed.
+**Hard block** — regex finds a high-confidence secret pattern. Masks the secret in the output. Won't allow re-issue until the secret is removed.
+
+**User-confirmable generic findings** — broad generic assignments like `api_key`, `secret`, `password`, and `token` prompt the user in interactive mode. If the user rejects a finding, or if no UI is available, the action is blocked.
 
 **Soft block** — regex is clean, agent reviews. If the agent says clean and re-issues, allowed through. If the diff changed between review and re-issue, requires fresh review.
 
