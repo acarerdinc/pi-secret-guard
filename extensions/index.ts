@@ -18,7 +18,6 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType, truncateHead, formatSize } from "@mariozechner/pi-coding-agent";
-import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import {
@@ -31,36 +30,16 @@ import {
 	scanFileNames,
 	formatFindings,
 } from "./scanner.ts";
+import { execGit } from "./exec.ts";
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
-/**
- * Spawns a process and returns stdout/stderr.
- * Using direct spawn instead of pi.exec() to avoid re-entrant crashes
- * when the tool_call handler fires on a re-issued command.
- */
-function execGit(
-	args: string[],
-	cwd: string,
-): Promise<{ code: number; stdout: string; stderr: string }> {
-	return new Promise((resolve) => {
-		const proc = spawn("git", args, { cwd });
-		const stdoutChunks: Buffer[] = [];
-		const stderrChunks: Buffer[] = [];
-		proc.stdout?.on("data", (d: Buffer) => stdoutChunks.push(d));
-		proc.stderr?.on("data", (d: Buffer) => stderrChunks.push(d));
-		proc.on("close", (code) =>
-			resolve({
-				code: code ?? 1,
-				stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-				stderr: Buffer.concat(stderrChunks).toString("utf8"),
-			}),
-		);
-		proc.on("error", (err) => resolve({ code: 1, stdout: "", stderr: String(err) }));
-	});
-}
+// `execGit` lives in ./exec.ts so it can be unit-tested in isolation. It
+// caps stdout/stderr at 256 MB by default to prevent ERR_STRING_TOO_LONG
+// crashes on very large diffs (a real failure mode on monorepo fork-branch
+// pushes — see exec.ts for full rationale).
 
 type GitAction = "commit" | "push";
 type PersistedReviewState = ReviewState & { action: GitAction; repoRoot: string };
