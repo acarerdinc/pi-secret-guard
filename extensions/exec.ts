@@ -14,10 +14,11 @@
  *
  * Strategy: cap each stream at `MAX_BUFFER_BYTES` (256 MB by default — well
  * below the string limit, leaves headroom for `Buffer.concat` overhead).
- * On overflow, kill the child and return a non-zero exit with a descriptive
- * stderr message. The caller (`pi-secret-guard`'s tool_call handler) treats
- * non-zero as scan failure → fail-closed (block the git op), which is the
- * correct security default.
+ * On overflow, kill the child and return `{ code: 1, overflow: true }` with a
+ * descriptive stderr message. Callers MUST check `.overflow` (or non-zero exit)
+ * and block the git op — an unscanned diff must never be allowed through.
+ * `index.ts` routes overflow to `overflowBlock()` to enforce this fail-closed
+ * security default.
  *
  * The cap can be overridden via the `PI_SECRET_GUARD_MAX_BUFFER_BYTES`
  * environment variable (advanced — most users won't need this).
