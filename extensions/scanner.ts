@@ -16,7 +16,6 @@ export interface SecretPattern {
 	 * Broad heuristics rather than a recognisable secret format. Generic findings
 	 * are the only ones suppressed for reference values (see allValuesAreReferences);
 	 * provider-specific formats such as `sk-ant-` or `AKIA...` always block.
-	 * Generic patterns must capture their assigned value in group 1.
 	 */
 	generic?: boolean;
 }
