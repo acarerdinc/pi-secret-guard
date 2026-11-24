@@ -12,6 +12,13 @@ import { createHash } from "node:crypto";
 export interface SecretPattern {
 	name: string;
 	pattern: RegExp;
+	/**
+	 * Broad heuristics rather than a recognisable secret format. Generic findings
+	 * are the only ones suppressed for reference values (see allValuesAreReferences);
+	 * provider-specific formats such as `sk-ant-` or `AKIA...` always block.
+	 * Generic patterns must capture their assigned value in group 1.
+	 */
+	generic?: boolean;
 }
 
 export interface Finding {
@@ -30,6 +37,20 @@ export interface ReviewState {
 // ============================================================================
 // Secret Patterns — ordered by specificity (most specific first)
 // ============================================================================
+
+// Key names the four generic assignment patterns match, written once so the
+// patterns and the reference classifier below cannot drift apart: if a key name
+// were added to a pattern but not here, a secret under that key would be judged
+// against no reference rule at all.
+const GENERIC_KEY_GROUPS = {
+	apiKey: "api[_-]?key|apikey",
+	secret: "secret[_-]?key|client[_-]?secret|app[_-]?secret",
+	password: "password|passwd|pwd",
+	token: "auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer",
+} as const;
+
+/** Every generic key name in one alternation. */
+const GENERIC_KEYS = Object.values(GENERIC_KEY_GROUPS).join("|");
 
 export const SECRET_PATTERNS: SecretPattern[] = [
 	// ── Cloud Providers ──────────────────────────────────────────────────────
@@ -98,25 +119,90 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 	{ name: "Credentials in URL", pattern: /[a-zA-Z]+:\/\/[^:\/\s]+:[^@\/\s]{3,}@[^\s]+/ },
 
 	// ── Generic Patterns (broader, checked last) ─────────────────────────────
+	// Built from GENERIC_KEY_GROUPS rather than written out, so the reference
+	// classifier is guaranteed to know every key these match.
 	{
 		name: "Generic API Key Assignment",
-		pattern: /(?:api[_-]?key|apikey)\s*[=:]\s*['"]?[A-Za-z0-9\-_./+=]{20,}['"]?/i,
+		pattern: new RegExp(
+			`(?:${GENERIC_KEY_GROUPS.apiKey})\\s*[=:]\\s*['"]?[A-Za-z0-9\\-_./+=]{20,}['"]?`,
+			"i",
+		),
+		generic: true,
 	},
 	{
 		name: "Generic Secret Assignment",
-		pattern:
-			/(?:secret[_-]?key|client[_-]?secret|app[_-]?secret)\s*[=:]\s*['"]?[A-Za-z0-9\-_./+=]{20,}['"]?/i,
+		pattern: new RegExp(
+			`(?:${GENERIC_KEY_GROUPS.secret})\\s*[=:]\\s*['"]?[A-Za-z0-9\\-_./+=]{20,}['"]?`,
+			"i",
+		),
+		generic: true,
 	},
 	{
 		name: "Generic Password Assignment",
-		pattern: /(?:password|passwd|pwd)\s*[=:]\s*['"]?[^\s'"]{8,}['"]?/i,
+		pattern: new RegExp(`(?:${GENERIC_KEY_GROUPS.password})\\s*[=:]\\s*['"]?[^'"\\s]{8,}['"]?`, "i"),
+		generic: true,
 	},
 	{
 		name: "Generic Token Assignment",
-		pattern:
-			/(?:auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer)\s*[=:]\s*['"]?[A-Za-z0-9\-_./+=]{20,}['"]?/i,
+		pattern: new RegExp(
+			`(?:${GENERIC_KEY_GROUPS.token})\\s*[=:]\\s*['"]?[A-Za-z0-9\\-_./+=]{20,}['"]?`,
+			"i",
+		),
+		generic: true,
 	},
 ];
+
+// ============================================================================
+// Reference Values
+// ----------------------------------------------------------------------------
+// A config line such as api_key: "os.environ/VENICE_INFERENCE_KEY" names where a
+// secret lives instead of containing it, which is the pattern LiteLLM, docker
+// compose and most secret managers require. The generic assignment patterns above
+// cannot tell the two apart, because `os.environ/` is made of characters a real
+// key can also contain.
+//
+// Only the generic patterns consult this. Provider-specific formats are
+// unambiguous and always block, so a real `sk-...` or `AKIA...` is unaffected.
+// ============================================================================
+
+/**
+ * A value that is a reference rather than a secret. The tail after each marker
+ * must be a bare identifier, so `os.environ/sk-proj-abc123def456` is NOT a
+ * reference and still blocks. Anything unrecognised falls through to blocking.
+ */
+const REFERENCE_VALUE =
+	/^(?:os\.environ[/.][A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*(?::?[-?+][^}]*)?\}|\$[A-Za-z_][A-Za-z0-9_]*|!secret\s+[A-Za-z_][A-Za-z0-9_]*|!vault\|\{[^}]*\})$/;
+
+/**
+ * Every generic key name with its assigned value token, globally, so a line
+ * carrying two assignments yields two matches. The token is the whole value up
+ * to whitespace, not just the part a secret-shaped pattern would accept, so
+ * trailing punctuation defeats the reference test rather than being ignored.
+ */
+const GENERIC_ASSIGNMENT = new RegExp(`(?:${GENERIC_KEYS})\\s*[=:]\\s*['"]?([^'"\\s]*)['"]?`, "gi");
+
+/**
+ * True when every generic secret-named assignment on `line` is given a reference
+ * rather than secret material.
+ *
+ * This is deliberately all-or-nothing across the line. A per-line boolean that
+ * looked only at the first match would let one reference launder whatever else
+ * shared the line, so `password: ${DB_PASS} api_key: <real key>` would pass
+ * unflagged. Anything unrecognised falls through to blocking.
+ *
+ * @param line - one added line of a diff, without its leading `+`.
+ */
+function allValuesAreReferences(line: string): boolean {
+	GENERIC_ASSIGNMENT.lastIndex = 0;
+	let sawMatch = false;
+	let match: RegExpExecArray | null;
+	while ((match = GENERIC_ASSIGNMENT.exec(line)) !== null) {
+		if (match.index === GENERIC_ASSIGNMENT.lastIndex) GENERIC_ASSIGNMENT.lastIndex++;
+		sawMatch = true;
+		if (!REFERENCE_VALUE.test(match[1] ?? "")) return false;
+	}
+	return sawMatch;
+}
 
 // ============================================================================
 // Suspicious File Patterns
@@ -276,8 +362,13 @@ export function scanDiffForSecrets(diff: string): Finding[] {
 
 		const addedContent = line.slice(1); // Remove leading +
 
-		for (const { name, pattern } of SECRET_PATTERNS) {
+		for (const { name, pattern, generic } of SECRET_PATTERNS) {
 			if (pattern.test(addedContent)) {
+				// A reference such as `os.environ/MY_KEY` carries no secret material,
+				// so it is not a finding for the broad generic patterns. Specific
+				// patterns are never suppressed, and suppression is decided per match
+				// so a reference cannot launder another key on the same line.
+				if (generic && allValuesAreReferences(addedContent)) continue;
 				// Mask the matched secret in the snippet
 				const masked = addedContent.replace(pattern, `███ ${name} ███`);
 				findings.push({

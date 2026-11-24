@@ -184,6 +184,101 @@ assertNoMatch("Generic Password Assignment", "password = short");
 assertNoMatch("Generic API Key Assignment", "api_key = abc");
 
 // ============================================================================
+// Tests: Reference Values
+// ----------------------------------------------------------------------------
+// The patterns above still match these lines; what changes is that
+// scanDiffForSecrets does not report them, because the value names where a
+// secret lives instead of being one. These go through scanDiffForSecrets rather
+// than assertMatch for that reason.
+// ============================================================================
+
+function scanLine(line: string): string[] {
+	return scanDiffForSecrets(`+++ b/probe.yaml\n+${line}`).map((f) => f.name);
+}
+
+function assertNotFlagged(description: string, line: string) {
+	const findings = scanLine(line);
+	assert(`${description} — not flagged`, findings.length === 0);
+	if (findings.length > 0) console.log(`     unexpected: ${findings.join(", ")}`);
+}
+
+function assertFlagged(description: string, line: string) {
+	assert(`${description} — still flagged`, scanLine(line).length > 0);
+}
+
+group("Reference Values: not secrets");
+assertNotFlagged("LiteLLM os.environ/ form", "      api_key: os.environ/VENICE_INFERENCE_KEY");
+assertNotFlagged("os.environ dotted form", "      api_key: os.environ.DEEPINFRA_API_KEY");
+assertNotFlagged("quoted", '      api_key: "os.environ/VENICE_INFERENCE_KEY"');
+assertNotFlagged("JSON style", '        "api_key": "os.environ/VENICE_INFERENCE_KEY"');
+assertNotFlagged("shell ${VAR}", "      api_key: ${VENICE_INFERENCE_KEY}");
+assertNotFlagged("shell ${VAR:-default}", "      api_key: ${VENICE_INFERENCE_KEY:-none}");
+assertNotFlagged("shell $VAR", "      api_key: $VENICE_INFERENCE_KEY");
+assertNotFlagged("compose !secret", "      api_key: !secret venice_key");
+assertNotFlagged("password reference", 'password = "${DB_PASSWORD}"');
+assertNotFlagged("token reference", "      access_token: os.environ/GITHUB_TOKEN");
+assertNotFlagged("secret reference", "      client_secret: os.environ/OAUTH_CLIENT_SECRET");
+
+group("Reference Values: real secrets still block");
+// Built at runtime to avoid push protection, matching the fixtures above.
+const fakeGenericKey = "abcdefghijklmnopqrstuvwxyz" + "1234";
+const fakePwValue = "my_super" + "_secret_pw";
+const fakePunctuatedRef = "os.environ/NOT_A_VAR_NAME" + "!";
+const fakeOpenAiKey = ["sk", "proj", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"].join("-");
+const fakeSmuggledKey = ["sk", "proj", "AbCdEfGhIjKlMnOpQrStUvWx"].join("-");
+assertFlagged("opaque key", `      api_key: ${fakeGenericKey}`);
+assertFlagged("plaintext password", `password = "${fakePwValue}"`);
+assertFlagged("OpenAI format", `      api_key: ${fakeOpenAiKey}`);
+// A reference marker alone must not launder a secret placed after it.
+assertFlagged("smuggle via os.environ/", `      api_key: os.environ/${fakeSmuggledKey}`);
+assertFlagged("reference with punctuation tail", `      api_key: ${fakePunctuatedRef}`);
+// A reference marker must not launder a secret sharing the same value.
+assertFlagged(
+	"reference plus a real key",
+	`      api_key: os.environ/A_B,${fakeOpenAiKey}`,
+);
+
+// Suppression is per match, not per line. A line-level boolean would let the
+// reference below vouch for the real secret sitting next to it, whichever order
+// they appear in, because the first match would classify the whole line.
+assertFlagged(
+	"reference launders a second key (ref first)",
+	`password: \${DB_PASS} api_key: ${fakeGenericKey}`,
+);
+assertFlagged(
+	"reference launders a second key (secret first)",
+	`api_key: os.environ/A_B password: ${fakePwValue}`,
+);
+assertFlagged(
+	"reference launders a same-named key",
+	`api_key: os.environ/A_B api_key: ${fakeGenericKey}`,
+);
+assertFlagged(
+	"reference launders a token key",
+	`access_token: \${OK} bearer = ${fakeGenericKey}`,
+);
+
+// The suppression is limited to the generic patterns. A provider-specific format
+// is unambiguous, so sharing a line with a reference must not excuse it. This is
+// the property the whole filter rests on: it narrows generic findings only.
+assertFlagged(
+	"aws key beside a reference",
+	`api_key: os.environ/A_B aws_access_key_id = AKIA${"A".repeat(16)}`,
+);
+assertFlagged(
+	"openai key beside a reference",
+	`password: \${OK} key = ${fakeOpenAiKey}`,
+);
+
+// These carry no secret-shaped value at all, so no pattern fires with or without
+// the reference filter. Asserted so a future pattern change cannot quietly start
+// or stop matching them.
+group("Reference Values: no pattern fires");
+assertNotFlagged("empty reference tail", "      api_key: os.environ/");
+assertNotFlagged("shell expansion with a dash", "      api_key: ${not-a-var-name}");
+
+
+// ============================================================================
 // Tests: Git Command Detection
 // ============================================================================
 
